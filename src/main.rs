@@ -4,10 +4,11 @@
 
 use std::fs;
 use std::io::{self, Read, Write};
+use std::os::fd::AsFd;
 use std::process::{Command, ExitCode, ExitStatus, Stdio};
 
 use serde_json::Value;
-use tally::cli::{self, Record};
+use tally::cli::{self, Record, View};
 use tally::exit_code;
 use tally::recording::Recording;
 use tally::report;
@@ -44,7 +45,7 @@ fn main() -> ExitCode {
             emit(&version, "", exit_code::SUCCESS)
         }
         Ok(cli::Command::Record(request)) => run_record(&request),
-        Ok(cli::Command::Summarize { limit, recording }) => run_summarize(limit, &recording),
+        Ok(cli::Command::Summarize { view, recording }) => run_summarize(&view, &recording),
         Err(fault) => emit("", &report::usage_fault(&fault), exit_code::USAGE),
     };
     ExitCode::from(code)
@@ -66,7 +67,7 @@ fn run_record(request: &Record) -> u8 {
         return emit("", &failure.message, failure.code);
     }
     let header = report::recorded_at(&request.recording.profile);
-    match summarized(request.limit, &request.recording) {
+    match summarized(&request.view, &request.recording) {
         Ok(summarized) => {
             let output = format!("{header}{}", summarized.text);
             emit(&output, &summarized.note, exit_code::SUCCESS)
@@ -75,17 +76,27 @@ fn run_record(request: &Record) -> u8 {
     }
 }
 
-fn run_summarize(limit: usize, recording: &Recording) -> u8 {
-    match summarized(limit, recording) {
+fn run_summarize(view: &View, recording: &Recording) -> u8 {
+    match summarized(view, recording) {
         Ok(summarized) => emit(&summarized.text, &summarized.note, exit_code::SUCCESS),
         Err(failure) => emit("", &failure.message, failure.code),
     }
 }
 
-/// Runs the program under samply. The program's stdout is discarded so the summary is
-/// all that prints; its stdin and stderr are the terminal's.
+/// Runs the program under samply. The program's stdout goes to tally's stderr, so the
+/// summary is all that stands on stdout and nothing the program printed is lost; its
+/// stdin and stderr are the terminal's.
 fn record(request: &Record) -> Result<(), Failure> {
     let rate = request.rate_hertz.to_string();
+    let program_stdout = match stderr_as_stdio() {
+        Ok(stdio) => stdio,
+        Err(error) => {
+            return Err(Failure {
+                code: exit_code::RECORDER,
+                message: report::recorder_not_started(&error),
+            });
+        }
+    };
     let started = Command::new(RECORDER_PROGRAM)
         .args([
             "record",
@@ -99,7 +110,7 @@ fn record(request: &Record) -> Result<(), Failure> {
         .arg("--")
         .args(&request.program)
         .stdin(Stdio::inherit())
-        .stdout(Stdio::null())
+        .stdout(program_stdout)
         .stderr(Stdio::inherit())
         .status();
     let status: ExitStatus = match started {
@@ -120,10 +131,17 @@ fn record(request: &Record) -> Result<(), Failure> {
     })
 }
 
-fn summarized(limit: usize, recording: &Recording) -> Result<Summarized, Failure> {
+/// This process's stderr as a stream a child can be handed.
+fn stderr_as_stdio() -> io::Result<Stdio> {
+    let stderr = io::stderr();
+    let owned = stderr.as_fd().try_clone_to_owned()?;
+    Ok(Stdio::from(owned))
+}
+
+fn summarized(view: &View, recording: &Recording) -> Result<Summarized, Failure> {
     let profile = read_json(&recording.profile)?;
     let symbols = read_json(&recording.sidecar)?;
-    let summary = match summary::summary_from(&profile, &symbols) {
+    let summary = match summary::summary_from(&profile, &symbols, &view.scope) {
         Ok(summary) => summary,
         Err(fault) => {
             return Err(Failure {
@@ -132,7 +150,7 @@ fn summarized(limit: usize, recording: &Recording) -> Result<Summarized, Failure
             });
         }
     };
-    let text = summary::rendered(&summary, limit);
+    let text = summary::rendered(&summary, view.limit);
     if summary.unidentified.is_empty() {
         return Ok(Summarized {
             text,

@@ -1,11 +1,13 @@
 //! The command line's grammar: the arguments in, the command to run or a usage fault out.
 
 use crate::recording::{self, Recording};
+use crate::summary::Scope;
 
-/// The rows each table prints where `--limit` is absent.
-pub const LIMIT_DEFAULT: u64 = 25;
 /// The most rows a table prints.
 pub const LIMIT_MAX: u64 = 1_000;
+/// The rows each table prints where `--limit` is absent: the heaviest hundred, which
+/// holds what a reader came for without filling their context with the rest.
+pub const LIMIT_DEFAULT: u64 = 100;
 /// The samples per second where `--rate` is absent: at 4 kHz a half-second command
 /// yields about two thousand samples.
 pub const RATE_HERTZ_DEFAULT: u64 = 4_000;
@@ -15,6 +17,7 @@ pub const RATE_HERTZ_MAX: u64 = 10_000;
 /// uncompressed, in the working directory.
 pub const OUTPUT_DEFAULT: &str = "profile.json";
 const LIMIT_FLAG: &str = "--limit";
+const UNDER_FLAG: &str = "--under";
 const RATE_FLAG: &str = "--rate";
 const OUTPUT_FLAG: &str = "--output";
 const SEPARATOR: &str = "--";
@@ -23,19 +26,26 @@ const SEPARATOR: &str = "--";
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
     Record(Record),
-    Summarize { limit: usize, recording: Recording },
+    Summarize { view: View, recording: Recording },
     Help,
     Version,
 }
 
-/// A program to run under samply, where its recording lands, and how much of the
+/// A program to run under samply, where its recording lands, and the view of the
 /// summary to print.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Record {
-    pub limit: usize,
+    pub view: View,
     pub rate_hertz: u64,
     pub recording: Recording,
     pub program: Vec<String>,
+}
+
+/// The view of a summary printed: the rows per table, and the samples in scope.
+#[derive(Debug, PartialEq, Eq)]
+pub struct View {
+    pub limit: usize,
+    pub scope: Scope,
 }
 
 /// Every way the arguments break the grammar.
@@ -49,6 +59,7 @@ pub enum UsageFault {
     NotACount { flag: String, value: String },
     ZeroCount(String),
     CountAboveMax { flag: String, max: u64 },
+    EmptyName(String),
     NotJson(String),
     MissingProgram,
     MissingRecording,
@@ -76,6 +87,7 @@ pub fn parse_arguments(arguments: &[String]) -> Result<Command, UsageFault> {
 /// program, and every word from there on is the program's, flags included.
 fn parse_record(words: &[&str]) -> Result<Command, UsageFault> {
     let mut limit = None;
+    let mut under = None;
     let mut rate_hertz = None;
     let mut output = None;
     let mut rest = words;
@@ -88,6 +100,11 @@ fn parse_record(words: &[&str]) -> Result<Command, UsageFault> {
                 limit = Some(bounded_count(LIMIT_FLAG, value, LIMIT_MAX)?);
                 rest = tail;
             }
+            [UNDER_FLAG, value, tail @ ..] => {
+                refuse_repeat(under.is_some(), UNDER_FLAG)?;
+                under = Some(function_name(UNDER_FLAG, value)?);
+                rest = tail;
+            }
             [RATE_FLAG, value, tail @ ..] => {
                 refuse_repeat(rate_hertz.is_some(), RATE_FLAG)?;
                 rate_hertz = Some(bounded_count(RATE_FLAG, value, RATE_HERTZ_MAX)?);
@@ -98,7 +115,7 @@ fn parse_record(words: &[&str]) -> Result<Command, UsageFault> {
                 output = Some(*value);
                 rest = tail;
             }
-            [flag @ (LIMIT_FLAG | RATE_FLAG | OUTPUT_FLAG)] => {
+            [flag @ (LIMIT_FLAG | UNDER_FLAG | RATE_FLAG | OUTPUT_FLAG)] => {
                 return Err(UsageFault::MissingValue((*flag).to_owned()));
             }
             [word, ..] if is_flag(word) => {
@@ -113,17 +130,21 @@ fn parse_record(words: &[&str]) -> Result<Command, UsageFault> {
     let recording = recording_named(output.unwrap_or(OUTPUT_DEFAULT))?;
     let program: Vec<String> = program.iter().map(|word| (*word).to_owned()).collect();
     Ok(Command::Record(Record {
-        limit: limit_or_default(limit),
+        view: View {
+            limit: limit_or_default(limit),
+            scope: scope_of(under),
+        },
         rate_hertz: rate_hertz.unwrap_or(RATE_HERTZ_DEFAULT),
         recording,
         program,
     }))
 }
 
-/// `--limit` may stand anywhere, since agents append a flag as often as they lead with
-/// it; the one other word is the recording.
+/// `--limit` and `--under` may stand anywhere, since agents append a flag as often as
+/// they lead with it; the one other word is the recording.
 fn parse_summarize(words: &[&str]) -> Result<Command, UsageFault> {
     let mut limit = None;
+    let mut under = None;
     let mut profile = None;
     let mut rest = words;
     // Each arm that continues drops at least one word, so the loop ends within the list.
@@ -135,7 +156,14 @@ fn parse_summarize(words: &[&str]) -> Result<Command, UsageFault> {
                 limit = Some(bounded_count(LIMIT_FLAG, value, LIMIT_MAX)?);
                 rest = tail;
             }
-            [LIMIT_FLAG] => return Err(UsageFault::MissingValue(LIMIT_FLAG.to_owned())),
+            [UNDER_FLAG, value, tail @ ..] => {
+                refuse_repeat(under.is_some(), UNDER_FLAG)?;
+                under = Some(function_name(UNDER_FLAG, value)?);
+                rest = tail;
+            }
+            [flag @ (LIMIT_FLAG | UNDER_FLAG)] => {
+                return Err(UsageFault::MissingValue((*flag).to_owned()));
+            }
             [word, tail @ ..] => {
                 if is_flag(word) {
                     return Err(UsageFault::UnknownFlag((*word).to_owned()));
@@ -153,7 +181,10 @@ fn parse_summarize(words: &[&str]) -> Result<Command, UsageFault> {
     };
     let recording = recording_named(profile)?;
     Ok(Command::Summarize {
-        limit: limit_or_default(limit),
+        view: View {
+            limit: limit_or_default(limit),
+            scope: scope_of(under),
+        },
         recording,
     })
 }
@@ -195,6 +226,26 @@ fn limit_or_default(limit: Option<u64>) -> usize {
         unreachable!("a limit under its ceiling fits a usize");
     };
     limit
+}
+
+fn function_name(flag: &str, value: &str) -> Result<String, UsageFault> {
+    if value.is_empty() {
+        return Err(UsageFault::EmptyName(flag.to_owned()));
+    }
+    Ok(value.to_owned())
+}
+
+fn scope_of(under: Option<String>) -> Scope {
+    match under {
+        Some(name) => {
+            assert!(
+                !name.is_empty(),
+                "an empty function name passed the grammar"
+            );
+            Scope::Under(name)
+        }
+        None => Scope::Whole,
+    }
 }
 
 fn recording_named(profile: &str) -> Result<Recording, UsageFault> {

@@ -110,6 +110,22 @@ inclusive
         let observed = run(&scratch, &["summarize", "run.json", "--limit", "1"]);
         assert_eq!(observed, (0, expected.to_owned(), String::new()));
     }
+
+    #[test]
+    fn when_summarized_under_a_function_then_the_header_counts_the_whole_beside_it() {
+        let scratch = Scratch::new();
+        scratch.write("run.json", PROFILE);
+        scratch.write("run.syms.json", SYMBOLS);
+        let expected = "\
+samples: 2 of 3 under parse
+self
+100.0%  parse
+inclusive
+100.0%  parse
+";
+        let observed = run(&scratch, &["summarize", "run.json", "--under", "parse"]);
+        assert_eq!(observed, (0, expected.to_owned(), String::new()));
+    }
 }
 
 mod given_a_recording_without_its_sidecar {
@@ -147,9 +163,9 @@ mod given_a_recording_missing_what_the_summary_reads {
         let scratch = Scratch::new();
         scratch.write("run.json", r#"{ "libs": [] }"#);
         scratch.write("run.syms.json", SYMBOLS);
-        let (code, stdout, stderr) = run(&scratch, &["summarize", "run.json"]);
-        assert_eq!((code, stdout.as_str()), (1, ""));
-        assert!(stderr.starts_with("tally: run.json does not hold what the summary reads"));
+        let expected = "tally: run.json does not hold what the summary reads: the profile carries nothing at \"threads\"\n";
+        let observed = run(&scratch, &["summarize", "run.json"]);
+        assert_eq!(observed, (1, String::new(), expected.to_owned()));
     }
 }
 
@@ -159,8 +175,9 @@ mod given_arguments_the_grammar_refuses {
     #[test]
     fn when_run_then_it_exits_on_usage_and_names_the_help() {
         let scratch = Scratch::new();
-        let (code, stdout, stderr) = run(&scratch, &["record"]);
-        assert_eq!((code, stdout.as_str()), (2, ""));
-        assert!(stderr.ends_with("Run `tally --help` for the grammar.\n"));
+        let expected =
+            "tally: record names no program to run\nRun `tally --help` for the grammar.\n";
+        let observed = run(&scratch, &["record"]);
+        assert_eq!(observed, (2, String::new(), expected.to_owned()));
     }
 }

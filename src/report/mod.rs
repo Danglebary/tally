@@ -11,21 +11,27 @@ pub const HELP: &str = "\
 tally: record a program under samply and print where its samples fall, as text.
 
 Usage:
-  tally record [--limit COUNT] [--rate HERTZ] [--output PATH] [--] PROGRAM [ARGUMENT...]
-      Run PROGRAM under samply, discard its stdout, and print the summary of what was
-      recorded. Flags lead; `--` or the first word that is not one starts the program,
-      and every word after it is the program's. --rate sets the samples per second
+  tally record [--limit COUNT] [--under NAME] [--rate HERTZ] [--output PATH] [--] PROGRAM [ARGUMENT...]
+      Run PROGRAM under samply and print the summary of what was recorded; the program's
+      stdout goes to stderr, so stdout holds the summary alone. Flags lead; `--` or the
+      first word that is not one starts the program, and every word after it is the
+      program's. --rate sets the samples per second
       (default 4000, at most 10000). --output names the recording (default
       profile.json); its symbols land beside it as <stem>.syms.json.
-  tally summarize [--limit COUNT] RECORDING
+  tally summarize [--limit COUNT] [--under NAME] RECORDING
       Print the summary of a recording `tally record` made, or one samply made with
       --unstable-presymbolicate and an --output ending .json.
 
 The summary counts the samples, then lists functions heaviest first in two tables:
 self, the share of samples whose innermost frame is the function, and inclusive, the
 share holding the function anywhere on the stack. A share is floored to a tenth of a
-percent. --limit sets the rows per table (default 25, at most 1000). samply does not
-pass on the program's exit status, so tally does not print it.
+percent, and a row that floors to none is left out. --limit sets the rows per table
+(default 100, at most 1000). --under NAME counts
+only the samples holding the function NAME on their stack, each cut at its outermost
+NAME frame, so the tables show where the time under NAME goes, NAME's inclusive row
+reads 100.0%, and the first line reads `samples: COUNT of RECORDED under NAME`; NAME is
+a function as the tables print it. samply does not pass on the program's exit status,
+so tally does not print it.
 
 Build the program with its symbols kept, such as a release profile with
 `debug = \"line-tables-only\"` and `strip = \"none\"`. On Linux, samply finds a file's
@@ -60,6 +66,7 @@ pub fn usage_fault(fault: &UsageFault) -> String {
         }
         UsageFault::ZeroCount(flag) => format!("{flag} takes a number above zero"),
         UsageFault::CountAboveMax { flag, max } => format!("{flag} takes at most {max}"),
+        UsageFault::EmptyName(flag) => format!("{flag} takes a function name"),
         UsageFault::NotJson(path) => format!("{path} does not name a file ending .json"),
         UsageFault::MissingProgram => "record names no program to run".to_owned(),
         UsageFault::MissingRecording => "summarize names no recording".to_owned(),

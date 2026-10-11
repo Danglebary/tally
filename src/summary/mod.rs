@@ -24,23 +24,42 @@ const NO_INDEX: i64 = -1;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FormatFault(pub String);
 
+/// Which samples the summary counts: every one recorded, or those holding a function on
+/// their stack, each cut at the root-most frame of that function so what lies under it
+/// is all that is counted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Scope {
+    Whole,
+    Under(String),
+}
+
+/// A function and the samples it holds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Weight {
+    pub name: String,
+    pub samples: u64,
+}
+
 /// The weight each function holds across every recorded thread.
 ///
-/// The samples counted, the samples whose leaf frame is the function, and the samples
-/// holding the function anywhere on the stack, each list heaviest first and
-/// alphabetical among equals, and the libraries samply found no code identifier for,
-/// whose frames are named for the library alone.
+/// The samples counted in scope, every sample recorded, the samples whose leaf frame is
+/// the function, and the samples holding the function anywhere on the stack, each list
+/// heaviest first and alphabetical among equals, and the libraries samply found no code
+/// identifier for, whose frames are named for the library alone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Summary {
+    pub scope: Scope,
     pub total: u64,
-    pub self_weights: Vec<(String, u64)>,
-    pub inclusive_weights: Vec<(String, u64)>,
+    pub recorded: u64,
+    pub self_weights: Vec<Weight>,
+    pub inclusive_weights: Vec<Weight>,
     pub unidentified: Vec<String>,
 }
 
 #[derive(Default)]
 struct Tally {
     total: u64,
+    recorded: u64,
     self_weights: HashMap<String, u64>,
     inclusive_weights: HashMap<String, u64>,
     sampled_libraries: HashSet<usize>,
@@ -68,21 +87,30 @@ struct StackTable {
     prefix: Vec<Option<usize>>,
 }
 
-/// The weights of every function across every thread of `profile`, each frame named
-/// through the symbols in `symbols`.
+/// The weights of every function across every thread of `profile` within `scope`, each
+/// frame named through the symbols in `symbols`.
 ///
 /// # Errors
 ///
 /// Returns a `FormatFault` naming the first field either value lacks or holds out of
 /// shape.
-pub fn summary_from(profile: &Value, symbols: &Value) -> Result<Summary, FormatFault> {
+///
+/// # Panics
+///
+/// Panics when more samples are counted in scope than were recorded.
+pub fn summary_from(
+    profile: &Value,
+    symbols: &Value,
+    scope: &Scope,
+) -> Result<Summary, FormatFault> {
     let tables = symbol_tables(symbols)?;
     let libraries = libraries_of(profile)?;
     let threads = array_at(profile, "threads", "the profile")?;
     let mut tally = Tally::default();
     for thread in threads {
-        let thread_tally = thread_tally(thread, &libraries, &tables)?;
+        let thread_tally = thread_tally(thread, &libraries, &tables, scope)?;
         tally.total = sum(tally.total, thread_tally.total)?;
+        tally.recorded = sum(tally.recorded, thread_tally.recorded)?;
         for (name, weight) in thread_tally.self_weights {
             add_weight(&mut tally.self_weights, name, weight)?;
         }
@@ -93,8 +121,14 @@ pub fn summary_from(profile: &Value, symbols: &Value) -> Result<Summary, FormatF
             .sampled_libraries
             .extend(thread_tally.sampled_libraries);
     }
+    assert!(
+        tally.total <= tally.recorded,
+        "more samples were counted in scope than were recorded"
+    );
     Ok(Summary {
+        scope: scope.clone(),
         total: tally.total,
+        recorded: tally.recorded,
         self_weights: heaviest_first(tally.self_weights),
         inclusive_weights: heaviest_first(tally.inclusive_weights),
         unidentified: unidentified(&libraries, &tally.sampled_libraries),
@@ -118,34 +152,53 @@ fn unidentified(libraries: &[Library], sampled: &HashSet<usize>) -> Vec<String> 
     names
 }
 
-/// The two tables, each cut to `limit` rows, every row a share of the samples counted
-/// floored to a tenth of a percent.
+/// The samples counted, then the two tables, each cut to `limit` rows, every row a share
+/// of the samples counted floored to a tenth of a percent, and a row that floors to none
+/// left out.
 ///
 /// # Panics
 ///
-/// Panics when `limit` is zero, or a weight exceeds the samples counted.
+/// Panics when `limit` is zero, a weight exceeds the samples counted, or the samples
+/// counted exceed the samples recorded.
 #[must_use]
 pub fn rendered(summary: &Summary, limit: usize) -> String {
     assert!(limit > 0, "a table of no rows was requested");
-    let mut text = format!("samples: {}\n", summary.total);
+    assert!(
+        summary.total <= summary.recorded,
+        "a summary counts more samples than were recorded"
+    );
+    let mut text = match &summary.scope {
+        Scope::Whole => format!("samples: {}\n", summary.total),
+        Scope::Under(name) => format!(
+            "samples: {} of {} under {name}\n",
+            summary.total, summary.recorded
+        ),
+    };
     for (title, weights) in [
         ("self", &summary.self_weights),
         ("inclusive", &summary.inclusive_weights),
     ] {
         text.push_str(title);
         text.push('\n');
-        for (name, weight) in weights.iter().take(limit) {
-            let share = share_text(*weight, summary.total);
+        for weight in weights.iter().take(limit) {
+            let permille = share_permille(weight.samples, summary.total);
+            // The rows are heaviest first, so the first below a tenth of a percent ends
+            // the table.
+            if permille == 0 {
+                break;
+            }
+            let share = permille_text(permille);
             text.push_str(&share);
             text.push_str("  ");
-            text.push_str(name);
+            text.push_str(&weight.name);
             text.push('\n');
         }
     }
     text
 }
 
-fn share_text(weight: u64, total: u64) -> String {
+/// The share `weight` holds of `total`, in tenths of a percent, floored.
+fn share_permille(weight: u64, total: u64) -> u64 {
     assert!(weight <= total, "a weight exceeds the samples counted");
     let Some(scaled) = weight.checked_mul(PERMILLE_PER_WHOLE) else {
         unreachable!("a sample count times a thousand fits a u64");
@@ -154,6 +207,12 @@ fn share_text(weight: u64, total: u64) -> String {
     let Some(permille) = scaled.checked_div(total) else {
         unreachable!("a weight is only shared out of a nonzero total");
     };
+    assert!(permille <= PERMILLE_PER_WHOLE, "a share exceeds the whole");
+    permille
+}
+
+fn permille_text(permille: u64) -> String {
+    assert!(permille <= PERMILLE_PER_WHOLE, "a share exceeds the whole");
     let Some(whole) = permille.checked_div(PERMILLE_PER_PERCENT) else {
         unreachable!("the divisor is a nonzero constant");
     };
@@ -180,9 +239,17 @@ fn add_weight(
     Ok(())
 }
 
-fn heaviest_first(weights: HashMap<String, u64>) -> Vec<(String, u64)> {
-    let mut ordered: Vec<(String, u64)> = weights.into_iter().collect();
-    ordered.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+fn heaviest_first(weights: HashMap<String, u64>) -> Vec<Weight> {
+    let mut ordered: Vec<Weight> = weights
+        .into_iter()
+        .map(|(name, samples)| Weight { name, samples })
+        .collect();
+    ordered.sort_by(|left, right| {
+        right
+            .samples
+            .cmp(&left.samples)
+            .then_with(|| left.name.cmp(&right.name))
+    });
     ordered
 }
 
@@ -190,6 +257,7 @@ fn thread_tally(
     thread: &Value,
     libraries: &[Library],
     tables: &HashMap<String, Vec<Symbol>>,
+    scope: &Scope,
 ) -> Result<Tally, FormatFault> {
     let frames = frame_names(thread, libraries, tables)?;
     let stacks = stack_table(thread, frames.len())?;
@@ -202,25 +270,61 @@ fn thread_tally(
             continue;
         };
         let chain = frames_of(stack, &stacks)?;
-        tally.total = sum(tally.total, weight)?;
-        let Some(leaf) = chain.first() else {
-            unreachable!("a walked stack holds at least its own frame");
+        let named = named_frames(&chain, &frames)?;
+        tally.recorded = sum(tally.recorded, weight)?;
+        let Some(kept) = kept_frames(&named, scope) else {
+            continue;
         };
-        let leaf_frame = checked_get(&frames, *leaf, "frame")?;
-        add_weight(&mut tally.self_weights, leaf_frame.name.clone(), weight)?;
-        // A recursive function appears on its stack more than once and counts once.
-        let mut seen: HashSet<&str> = HashSet::new();
-        for index in chain {
-            let frame = checked_get(&frames, index, "frame")?;
-            if let Some(library) = frame.library {
-                tally.sampled_libraries.insert(library);
-            }
-            if seen.insert(frame.name.as_str()) {
-                add_weight(&mut tally.inclusive_weights, frame.name.clone(), weight)?;
-            }
-        }
+        tally.total = sum(tally.total, weight)?;
+        count_sample(&mut tally, kept, weight)?;
     }
     Ok(tally)
+}
+
+/// Each frame of `chain` resolved through the frame table, leaf first.
+fn named_frames<'a>(chain: &[usize], frames: &'a [Frame]) -> Result<Vec<&'a Frame>, FormatFault> {
+    let mut named = Vec::with_capacity(chain.len());
+    for index in chain {
+        let frame = checked_get(frames, *index, "frame")?;
+        named.push(frame);
+    }
+    Ok(named)
+}
+
+/// The frames of `chain` the scope counts: every one under the whole program, or the
+/// leaf through the root-most frame named by `Under`, and none where no frame is.
+fn kept_frames<'a>(chain: &'a [&'a Frame], scope: &Scope) -> Option<&'a [&'a Frame]> {
+    let Scope::Under(name) = scope else {
+        return Some(chain);
+    };
+    let anchor = chain.iter().rposition(|frame| frame.name == *name)?;
+    let Some(count) = anchor.checked_add(1) else {
+        unreachable!("a position within a chain is below its length");
+    };
+    let Some(kept) = chain.get(..count) else {
+        unreachable!("a count no greater than the chain's length cuts it");
+    };
+    Some(kept)
+}
+
+/// Counts one sample of `weight` whose kept frames are `kept`, leaf first: once for its
+/// leaf and once for each distinct function on it.
+fn count_sample(tally: &mut Tally, kept: &[&Frame], weight: u64) -> Result<(), FormatFault> {
+    let Some(leaf) = kept.first() else {
+        unreachable!("a kept stack holds at least its anchor");
+    };
+    add_weight(&mut tally.self_weights, leaf.name.clone(), weight)?;
+    // A recursive function appears on its stack more than once and counts once.
+    let mut seen: HashSet<&str> = HashSet::new();
+    for frame in kept {
+        if let Some(library) = frame.library {
+            tally.sampled_libraries.insert(library);
+        }
+        if seen.insert(frame.name.as_str()) {
+            add_weight(&mut tally.inclusive_weights, frame.name.clone(), weight)?;
+        }
+    }
+    Ok(())
 }
 
 /// The frames of a stack, leaf first. Each prefix is checked to index an earlier

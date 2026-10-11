@@ -4,6 +4,20 @@
 
 use super::*;
 
+fn whole(limit: usize) -> View {
+    View {
+        limit,
+        scope: Scope::Whole,
+    }
+}
+
+fn under(limit: usize, name: &str) -> View {
+    View {
+        limit,
+        scope: Scope::Under(name.to_owned()),
+    }
+}
+
 fn parsed(words: &[&str]) -> Result<Command, UsageFault> {
     let arguments: Vec<String> = words.iter().map(|word| (*word).to_owned()).collect();
     parse_arguments(&arguments)
@@ -26,7 +40,7 @@ mod given_record_naming_only_a_program {
     #[test]
     fn when_parsed_then_the_defaults_stand() {
         let expected = Command::Record(Record {
-            limit: 25,
+            view: whole(100),
             rate_hertz: 4_000,
             recording: recording("profile.json", "profile.syms.json"),
             program: owned(&["./target/release/app", "check"]),
@@ -49,6 +63,8 @@ mod given_record_leading_with_flags {
             "100",
             "--limit",
             "5",
+            "--under",
+            "app::walk",
             "--output",
             "out/run.json",
             "app",
@@ -56,7 +72,7 @@ mod given_record_leading_with_flags {
             "9",
         ];
         let expected = Command::Record(Record {
-            limit: 5,
+            view: under(5, "app::walk"),
             rate_hertz: 100,
             recording: recording("out/run.json", "out/run.syms.json"),
             program: owned(&["app", "--limit", "9"]),
@@ -67,7 +83,7 @@ mod given_record_leading_with_flags {
     #[test]
     fn when_parsed_holding_a_separator_then_a_program_led_by_a_dash_is_the_program() {
         let expected = Command::Record(Record {
-            limit: 25,
+            view: whole(100),
             rate_hertz: 4_000,
             recording: recording("profile.json", "profile.syms.json"),
             program: owned(&["-app", "--rate", "1"]),
@@ -90,6 +106,8 @@ mod given_record_the_grammar_refuses {
         when_parsed_holding_a_limit_past_the_ceiling_then_it_is_refused: &["record", "--limit", "1001", "app"] => Err(UsageFault::CountAboveMax { flag: "--limit".to_owned(), max: 1_000 }),
         when_parsed_holding_a_rate_past_the_ceiling_then_it_is_refused: &["record", "--rate", "10001", "app"] => Err(UsageFault::CountAboveMax { flag: "--rate".to_owned(), max: 10_000 }),
         when_parsed_holding_a_flag_twice_then_it_is_refused: &["record", "--rate", "1", "--rate", "2", "app"] => Err(UsageFault::RepeatedFlag("--rate".to_owned())),
+        when_parsed_holding_an_empty_function_name_then_it_is_refused: &["record", "--under", "", "app"] => Err(UsageFault::EmptyName("--under".to_owned())),
+        when_parsed_holding_a_function_name_without_a_value_then_it_is_refused: &["record", "--under"] => Err(UsageFault::MissingValue("--under".to_owned())),
         when_parsed_holding_a_value_that_is_not_a_number_then_it_is_refused: &["record", "--limit", "many", "app"] => Err(UsageFault::NotACount { flag: "--limit".to_owned(), value: "many".to_owned() }),
         when_parsed_holding_an_output_naming_no_json_file_then_it_is_refused: &["record", "--output", "run.json.gz", "app"] => Err(UsageFault::NotJson("run.json.gz".to_owned())),
         when_parsed_holding_an_unknown_flag_then_it_is_refused: &["record", "--frequency", "1", "app"] => Err(UsageFault::UnknownFlag("--frequency".to_owned())),
@@ -100,8 +118,9 @@ mod given_summarize {
     use super::*;
 
     rows! { |words: &[&str]| parsed(words);
-        when_parsed_holding_a_recording_then_it_is_summarized_at_the_default_limit: &["summarize", "run.json"] => Ok(Command::Summarize { limit: 25, recording: recording("run.json", "run.syms.json") }),
-        when_parsed_holding_the_limit_after_the_recording_then_the_limit_is_taken: &["summarize", "run.json", "--limit", "3"] => Ok(Command::Summarize { limit: 3, recording: recording("run.json", "run.syms.json") }),
+        when_parsed_holding_a_recording_then_it_is_summarized_at_the_default_limit: &["summarize", "run.json"] => Ok(Command::Summarize { view: whole(100), recording: recording("run.json", "run.syms.json") }),
+        when_parsed_holding_the_limit_after_the_recording_then_the_limit_is_taken: &["summarize", "run.json", "--limit", "3"] => Ok(Command::Summarize { view: whole(3), recording: recording("run.json", "run.syms.json") }),
+        when_parsed_holding_a_function_name_then_the_scope_is_under_it: &["summarize", "--under", "app::walk", "run.json"] => Ok(Command::Summarize { view: under(100, "app::walk"), recording: recording("run.json", "run.syms.json") }),
     }
 }
 
@@ -114,6 +133,8 @@ mod given_summarize_the_grammar_refuses {
         when_parsed_holding_a_record_flag_then_it_is_refused: &["summarize", "--rate", "1", "a.json"] => Err(UsageFault::UnknownFlag("--rate".to_owned())),
         when_parsed_holding_a_recording_naming_no_json_file_then_it_is_refused: &["summarize", "profile.json.gz"] => Err(UsageFault::NotJson("profile.json.gz".to_owned())),
         when_parsed_holding_a_limit_without_a_value_then_it_is_refused: &["summarize", "a.json", "--limit"] => Err(UsageFault::MissingValue("--limit".to_owned())),
+        when_parsed_holding_a_function_name_twice_then_it_is_refused: &["summarize", "--under", "a", "--under", "b", "a.json"] => Err(UsageFault::RepeatedFlag("--under".to_owned())),
+        when_parsed_holding_an_empty_function_name_then_it_is_refused: &["summarize", "--under", "", "a.json"] => Err(UsageFault::EmptyName("--under".to_owned())),
     }
 }
 
