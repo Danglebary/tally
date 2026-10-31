@@ -6,7 +6,7 @@ edition = "2024"
 # pins rather than the floor a dependency declares.
 rust-version = "1.99"
 description = "Records a command under samply and prints, as text, the share of samples each function holds as the leaf of the stack and anywhere on it"
-license = "MIT"
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/Danglebary/tally"
 
 [dependencies]
