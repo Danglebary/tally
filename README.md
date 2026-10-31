@@ -57,3 +57,9 @@ cargo bench --profile profiling --bench outline --config "target.'cfg(all())'.ru
 ## Installing
 
 The flake's package carries the samply its lock pins and puts it ahead of any other on the binary's path, because the symbols sidecar tally reads is a format samply marks unstable and the two move together. `cargo install --locked --path .` installs the binary alone, which runs the `samply` on the path.
+
+## License
+
+Licensed under either of the [Apache License, Version 2.0](LICENSE-APACHE) or the [MIT license](LICENSE-MIT), at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in the work by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without any additional terms or conditions.
